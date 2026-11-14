@@ -6,6 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
 from app.main import app
+from app.models.application import Application
 from app.models.user import User
 from app.security import hash_password, get_current_user
 
@@ -26,6 +27,7 @@ def client():
     db.add_all([user, other])
     db.commit()
     db.refresh(user)
+    db.refresh(other)
 
     def override_get_db():
         try:
@@ -87,10 +89,20 @@ def test_invalid_status_rejected(client):
 
 
 def test_user_cannot_access_another_users_application(client):
-    # The API scopes every operation to the authenticated user's ID.
-    created = client.post(
-        "/applications/",
-        json={"company": "Private Co", "role": "Engineer"},
+    # Create a record owned by the second user, while the client is
+    # authenticated as the first user.
+    db = TestingSessionLocal()
+    other_user = db.query(User).filter_by(email="other@example.com").one()
+    private_application = Application(
+        user_id=other_user.id,
+        company="Private Co",
+        role="Engineer",
     )
-    app_id = created.json()["id"]
-    assert client.get(f"/applications/{app_id}").status_code == 404
+    db.add(private_application)
+    db.commit()
+    db.refresh(private_application)
+    app_id = private_application.id
+    db.close()
+
+    response = client.get(f"/applications/{app_id}")
+    assert response.status_code == 404
