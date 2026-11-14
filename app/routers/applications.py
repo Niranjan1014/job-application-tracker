@@ -46,6 +46,21 @@ def list_applications(
     ).limit(page_size).all()
 
 
+@router.get("/{app_id}", response_model=ApplicationResponse)
+def get_application(
+    app_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    application = db.query(Application).filter(
+        Application.id == app_id,
+        Application.user_id == current_user.id,
+    ).first()
+    if application is None:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return application
+
+
 @router.patch("/{app_id}", response_model=ApplicationResponse)
 def update_application(
     app_id: int,
