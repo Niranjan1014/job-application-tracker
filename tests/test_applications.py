@@ -1,16 +1,96 @@
-"""Tests for the applications endpoints."""
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch, MagicMock
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
-def test_health_endpoint():
-    from app.main import app
-    client = TestClient(app)
-    with patch("app.database.engine"):
-        resp = client.get("/health")
-    assert resp.status_code == 200
+from app.database import Base, get_db
+from app.main import app
+from app.models.user import User
+from app.security import hash_password, get_current_user
 
-def test_valid_status_values():
-    valid = ["Applied", "Screening", "Interview", "Offer", "Rejected"]
-    assert len(valid) == 5
-    assert "Applied" in valid
+TEST_ENGINE = create_engine(
+    "sqlite://",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=TEST_ENGINE)
+
+
+@pytest.fixture()
+def client():
+    Base.metadata.create_all(bind=TEST_ENGINE)
+    db = TestingSessionLocal()
+    user = User(email="test@example.com", hashed_password=hash_password("StrongPass123"))
+    other = User(email="other@example.com", hashed_password=hash_password("OtherPass123"))
+    db.add_all([user, other])
+    db.commit()
+    db.refresh(user)
+
+    def override_get_db():
+        try:
+            yield db
+        finally:
+            pass
+
+    def override_current_user():
+        return user
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = override_current_user
+    with TestClient(app) as test_client:
+        yield test_client
+    app.dependency_overrides.clear()
+    db.close()
+    Base.metadata.drop_all(bind=TEST_ENGINE)
+
+
+def test_health_endpoint(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_create_and_list_application(client):
+    created = client.post(
+        "/applications/",
+        json={"company": "Germin8", "role": "AI Automation Intern"},
+    )
+    assert created.status_code == 201
+    assert created.json()["company"] == "Germin8"
+
+    listed = client.get("/applications/")
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+
+
+def test_update_application_status(client):
+    created = client.post(
+        "/applications/",
+        json={"company": "Example", "role": "Python Developer"},
+    )
+    app_id = created.json()["id"]
+    updated = client.patch(f"/applications/{app_id}", json={"status": "Interview"})
+    assert updated.status_code == 200
+    assert updated.json()["status"] == "Interview"
+
+
+def test_invalid_status_rejected(client):
+    created = client.post(
+        "/applications/",
+        json={"company": "Example", "role": "Python Developer"},
+    )
+    response = client.patch(
+        f"/applications/{created.json()['id']}", json={"status": "Unknown"}
+    )
+    assert response.status_code == 400
+
+
+def test_user_cannot_access_another_users_application(client):
+    # The API scopes every operation to the authenticated user's ID.
+    created = client.post(
+        "/applications/",
+        json={"company": "Private Co", "role": "Engineer"},
+    )
+    app_id = created.json()["id"]
+    assert client.get(f"/applications/{app_id}").status_code == 404
